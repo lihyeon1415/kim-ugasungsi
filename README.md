@@ -22,9 +22,9 @@ python precompute_forecasts.py
 ## 입력 데이터
 
 - 기본 입력은 `kat_sale_citrus_part2.zip`의 `kat_sale_citrus_merged.csv` 집계입니다.
-- 한라봉·천혜향은 제공된 69개 월별 `mkat_sale_citrus` 원자료에서 요청한 3·5·9kg 상자 거래를 추려 `rf_dashboard_supplement.csv`에 저장했습니다.
+- 한라봉·천혜향은 제공된 69개 월별 `mkat_sale_citrus` 원자료에서 요청한 3·5·9kg 상자 거래를 추려 기본 저장 히스토리 CSV에 합쳤습니다. 원자료 집계본은 `rf_dashboard_supplement.csv`로도 보관합니다.
 - 품목 선택에는 조생귤·한라봉·하우스감귤·천혜향 네 가지를 모두 유지합니다. 시장 선택은 주요 5개 시장 개별 선택과 함께 보기입니다.
-- 모델과 예측 계산은 화면을 열기 전에 실행해 저장합니다. Streamlit 화면은 저장된 예측 CSV를 읽어 보여줍니다.
+- 모델과 예측 계산은 화면을 열기 전에 실행해 저장합니다. Streamlit 화면은 네 품목이 들어 있는 기본 히스토리 CSV와 저장된 예측 CSV를 읽어 보여줍니다.
 - 상세 집계와 제외 기준은 `data_audit.md`, 파일별 입력 정보는 `data_manifest.json`에 있습니다.
 
 ## 예측 방식

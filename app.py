@@ -105,9 +105,6 @@ def load_data():
     if not DATA_PATH.exists() or not MANIFEST_PATH.exists():
         raise FileNotFoundError("app.py와 rf_dashboard_history.csv, data_manifest.json을 같은 폴더에 두세요.")
     df = pd.read_csv(DATA_PATH, encoding="utf-8-sig", parse_dates=["date"])
-    if SUPPLEMENT_PATH.exists():
-        supplement = pd.read_csv(SUPPLEMENT_PATH, encoding="utf-8-sig", parse_dates=["date"])
-        df = pd.concat([df, supplement], ignore_index=True)
     for col in ["market", "variety", "grade", "size"]:
         df[col] = df[col].fillna("미지정").astype(str).replace({".": "미지정", "nan": "미지정"})
     for col in ["box_kg", "volume_ton", "price_kg", "volume_kg", "total_price", "price_box", "avgprc_box"]:
