@@ -19,6 +19,7 @@ from sklearn.preprocessing import OneHotEncoder
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "rf_dashboard_history.csv"
+SUPPLEMENT_PATH = BASE_DIR / "rf_dashboard_supplement.csv"
 MANIFEST_PATH = BASE_DIR / "data_manifest.json"
 MODEL_PATH = BASE_DIR / "rf_model_bundle.pkl"
 FORECASTS_PATH = BASE_DIR / "rf_precomputed_forecasts.csv"
@@ -104,6 +105,9 @@ def load_data():
     if not DATA_PATH.exists() or not MANIFEST_PATH.exists():
         raise FileNotFoundError("app.py와 rf_dashboard_history.csv, data_manifest.json을 같은 폴더에 두세요.")
     df = pd.read_csv(DATA_PATH, encoding="utf-8-sig", parse_dates=["date"])
+    if SUPPLEMENT_PATH.exists():
+        supplement = pd.read_csv(SUPPLEMENT_PATH, encoding="utf-8-sig", parse_dates=["date"])
+        df = pd.concat([df, supplement], ignore_index=True)
     for col in ["market", "variety", "grade", "size"]:
         df[col] = df[col].fillna("미지정").astype(str).replace({".": "미지정", "nan": "미지정"})
     for col in ["box_kg", "volume_ton", "price_kg", "volume_kg", "total_price", "price_box", "avgprc_box"]:
@@ -111,6 +115,11 @@ def load_data():
     df = df.dropna(subset=["date", "box_kg", "volume_ton", "price_kg"])
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     return df, manifest
+
+
+def products_with_source_data(history: pd.DataFrame) -> list[str]:
+    present = set(history["variety"].dropna().astype(str))
+    return [product for product in PRODUCTS if product in present]
 
 
 def make_training_frames(history: pd.DataFrame):
@@ -167,6 +176,12 @@ def score(actual, predicted):
     }
 
 
+def sample_training_frame(frame: pd.DataFrame, max_rows: int = 120_000) -> pd.DataFrame:
+    if len(frame) <= max_rows:
+        return frame
+    return frame.sample(n=max_rows, random_state=42).sort_index()
+
+
 @st.cache_resource(show_spinner=False)
 def fit_random_forest(fingerprint: str):
     history, _ = load_data()
@@ -175,6 +190,10 @@ def fit_random_forest(fingerprint: str):
     vol_train, vol_valid = base[base.date < validation_start], base[base.date >= validation_start]
     price_train = price_frame[price_frame.date < validation_start]
     price_valid = price_frame[price_frame.date >= validation_start]
+    vol_train = sample_training_frame(vol_train)
+    price_train = sample_training_frame(price_train)
+    volume_fit_frame = sample_training_frame(base)
+    price_fit_frame = sample_training_frame(price_frame)
 
     scores = {}
     for kind, train, valid, target, features in [
@@ -188,8 +207,8 @@ def fit_random_forest(fingerprint: str):
 
     models = {}
     for kind, frame, target, features in [
-        ("volume", base, "volume_ton", VOL_FEATURES),
-        ("price", price_frame, "price_kg", PRICE_FEATURES),
+        ("volume", volume_fit_frame, "volume_ton", VOL_FEATURES),
+        ("price", price_fit_frame, "price_kg", PRICE_FEATURES),
     ]:
         model = model_pipeline(kind)
         model.fit(frame[features], np.log1p(frame[target].clip(lower=0)))
@@ -201,17 +220,18 @@ def fit_random_forest(fingerprint: str):
     yearly = season.groupby(["variety", "week"])["year"].nunique().reset_index(name="years")
     active_weeks = {
         variety: set(yearly[(yearly.variety == variety) & (yearly.years >= 2)].week.astype(int))
-        for variety in PRODUCTS
+        for variety in products_with_source_data(history)
     }
     scores["validation_start"] = validation_start
     scores["validation_end"] = base.date.max()
-    scores["volume_train_rows"] = int(len(base))
-    scores["price_train_rows"] = int(len(price_frame))
+    scores["volume_train_rows"] = int(len(volume_fit_frame))
+    scores["price_train_rows"] = int(len(price_fit_frame))
     return models, scores, active_weeks, base
 
 
 def data_fingerprint(history: pd.DataFrame, manifest: dict) -> str:
-    return f"{len(history)}-{history.date.max()}-{manifest['source_member_bytes']}"
+    supplement_bytes = manifest.get("supplement_source", {}).get("file_bytes", 0)
+    return f"{len(history)}-{history.date.max()}-{manifest['source_member_bytes']}-{supplement_bytes}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -263,9 +283,13 @@ if os.environ.get("CITRUS_TRAIN_MODEL_ONLY") == "1":
 def forest_values(model: Pipeline, frame: pd.DataFrame, features: list[str]):
     transformed = model.named_steps["prep"].transform(frame[features])
     forest = model.named_steps["forest"]
-    trees = np.vstack([tree.predict(transformed) for tree in forest.estimators_])
+    leaf_ids = forest.apply(transformed)
+    trees = np.column_stack([
+        tree.tree_.value[leaf_ids[:, index], 0, 0]
+        for index, tree in enumerate(forest.estimators_)
+    ]).T
     actual_scale = np.maximum(0, np.expm1(trees))
-    mean = np.maximum(0, np.expm1(model.predict(frame[features])))
+    mean = np.maximum(0, np.expm1(trees.mean(axis=0)))
     return mean, np.quantile(actual_scale, 0.10, axis=0), np.quantile(actual_scale, 0.90, axis=0)
 
 
@@ -349,10 +373,11 @@ def seasonal_shares(source: pd.DataFrame, day: date) -> pd.DataFrame:
     return weights[["grade", "size", "share"]]
 
 
-def simulate_market(history, models, state, market, variety, box_kg, sim_start, target_dates, active_weeks, grade_filter, size_filter):
-    source = history[
-        (history.market == market) & (history.variety == variety) & (history.box_kg == float(box_kg))
-    ].copy()
+def simulate_market(history, models, state, market, variety, box_kg, sim_start, target_dates, active_weeks, grade_filter, size_filter, source=None):
+    if source is None:
+        source = history[
+            (history.market == market) & (history.variety == variety) & (history.box_kg == float(box_kg))
+        ].copy()
     if source.empty:
         return []
     final_day = target_dates[-1]
@@ -484,6 +509,14 @@ def aggregate_market_frame(frame, market_ids, label):
     return daily[["date", "market", "volume_ton", "price_kg"]]
 
 
+def only_common_market_dates(frame, expected_markets):
+    if frame.empty:
+        return frame.copy()
+    market_counts = frame.groupby("date")["market"].nunique()
+    common_dates = market_counts[market_counts == expected_markets].index
+    return frame[frame.date.isin(common_dates)].copy()
+
+
 def export_precomputed_forecasts():
     history, manifest = load_data()
     fingerprint = data_fingerprint(history, manifest)
@@ -498,8 +531,12 @@ def export_precomputed_forecasts():
         | {generated_on + timedelta(days=7)}
     )
     states = create_states(base)
+    sources = {
+        key: group
+        for key, group in history.groupby(BASE_KEYS, sort=False)
+    }
     exported = []
-    for variety in PRODUCTS:
+    for variety in products_with_source_data(history):
         active = active_weeks.get(variety, set())
         days_by_start = {
             start: open_days(start, active, 7)
@@ -511,13 +548,15 @@ def export_precomputed_forecasts():
             continue
         for box_kg in WEIGHTS[variety]:
             for market in markets:
-                state = states.get((market, variety, float(box_kg)))
-                if state is None:
+                key = (market, variety, float(box_kg))
+                state = states.get(key)
+                source = sources.get(key)
+                if state is None or source is None:
                     continue
                 rows = simulate_market(
                     history, models, state, market, variety, float(box_kg),
                     last_actual + timedelta(days=1), target_days, active,
-                    "전체 등급", "전체 규격",
+                    "전체 등급", "전체 규격", source=source,
                 )
                 if not rows:
                     continue
@@ -547,6 +586,7 @@ def export_precomputed_forecasts():
         "validation_end": pd.Timestamp(scores["validation_end"]).date().isoformat(),
         "volume_train_rows": int(scores["volume_train_rows"]),
         "price_train_rows": int(scores["price_train_rows"]),
+        "training_sample_limit_per_target": 120_000,
         "scores": {
             key: {metric: float(value) if metric != "n" and metric != "n_positive" else int(value)
                   for metric, value in scores[key].items()}
@@ -568,6 +608,9 @@ try:
 except Exception as exc:
     st.error(f"데이터를 불러오지 못했습니다: {exc}")
     st.stop()
+
+PRODUCTS_WITH_DATA = products_with_source_data(history)
+PRODUCTS_WITHOUT_DATA = [product for product in PRODUCTS if product not in PRODUCTS_WITH_DATA]
 
 MARKETS = manifest["top5_markets"]
 ALL_MARKETS = sorted(history.market.dropna().astype(str).unique())
@@ -599,20 +642,38 @@ if saved_picker_date is not None:
 
 with st.sidebar:
     st.markdown("### 🔎 조회 조건 설정")
-    market_options = ["주요 5개 시장 함께 보기"] + [MARKET_LABEL[m] for m in ALL_MARKETS]
+    if st.session_state.get("variety_choice") not in PRODUCTS:
+        st.session_state.pop("variety_choice", None)
+    variety = st.selectbox("품목 선택", PRODUCTS, key="variety_choice")
+    if st.session_state.get("box_choice") not in WEIGHTS[variety]:
+        st.session_state.pop("box_choice", None)
+    box_kg = st.selectbox("거래단위 선택", WEIGHTS[variety], format_func=lambda x: f"{x:g}kg 상자", key="box_choice")
+
+    together_option = "주요 5개 시장 함께 보기"
+    available_market_ids = [
+        market for market in MARKETS
+        if ((history.market == market) & (history.variety == variety) & (history.box_kg == float(box_kg))).any()
+    ]
+    market_options = [together_option] + [MARKET_LABEL[m] for m in MARKETS]
+    if st.session_state.get("market_choice") not in market_options:
+        st.session_state.pop("market_choice", None)
     market_label = st.selectbox(
-        f"시장 선택 ({len(ALL_MARKETS)}개 시장)", market_options,
-        index=1 + ALL_MARKETS.index("서울가락") if "서울가락" in ALL_MARKETS else 1,
-        help="개별 시장은 데이터에 있는 모든 시장 중에서 고를 수 있습니다. 함께 보기를 고르면 전체 시장과 주요 5개 시장을 비교합니다.",
+        "주요 5개 시장 선택", market_options,
+        index=1 + MARKETS.index("서울가락") if "서울가락" in MARKETS else 0,
+        help="주요 5개 시장을 각각 선택하거나 함께 볼 수 있습니다. 선택한 품목·규격의 데이터가 없는 시장은 화면에 안내됩니다.",
         key="market_choice",
     )
-    variety = st.selectbox("품목 선택", PRODUCTS, key="variety_choice")
-    box_kg = st.selectbox("거래단위 선택", WEIGHTS[variety], format_func=lambda x: f"{x:g}kg 상자", key="box_choice")
-    chosen_market = None if market_label == "주요 5개 시장 함께 보기" else MARKET_FROM_LABEL[market_label]
-    scope_markets = MARKETS if chosen_market is None else [chosen_market]
+    chosen_market = None if market_label == together_option else MARKET_FROM_LABEL[market_label]
+    comparison_markets = available_market_ids if chosen_market is None else [chosen_market]
+    if not comparison_markets:
+        st.warning(f"{variety} {float(box_kg):g}kg의 저장된 거래 데이터가 아직 없습니다.")
+        st.stop()
+    scope_markets = comparison_markets
     available = history[
         history.market.isin(scope_markets) & (history.variety == variety) & (history.box_kg == float(box_kg))
     ]
+    if PRODUCTS_WITHOUT_DATA:
+        st.caption("품목 선택지는 그대로 유지합니다. 원자료가 없는 품목: " + ", ".join(PRODUCTS_WITHOUT_DATA))
     # Grade and size are intentionally not exposed as filters. Predictions
     # aggregate all historical grade/size combinations for the selected item.
     grade = "전체 등급"
@@ -684,9 +745,10 @@ else:
     value_label = "예측"
 
 forecast["weekday"] = forecast.date.dt.dayofweek.map({0:"월",1:"화",2:"수",3:"목",4:"금",5:"토",6:"일"})
-selected_rows = forecast[forecast.market.isin(MARKETS)] if chosen_market is None else forecast[forecast.market == chosen_market]
+selected_rows = forecast[forecast.market.isin(comparison_markets)] if chosen_market is None else forecast[forecast.market == chosen_market]
 if selected_rows.empty:
-    selected_rows = forecast
+    st.warning("선택한 시장·품목·규격의 저장 데이터가 없습니다.")
+    st.stop()
 target_rows = selected_rows[selected_rows.date.dt.date == target_date]
 if target_rows.empty:
     target_rows = selected_rows[selected_rows.date == selected_rows.date.min()]
@@ -697,7 +759,7 @@ daily_rollup = selected_rows.groupby("date").apply(
 mean_price = float(np.average(selected_rows.price_kg, weights=selected_rows.volume_ton.clip(lower=.0001)))
 price_change = (float(daily_rollup.iloc[-1]) / float(daily_rollup.iloc[0]) - 1) * 100 if len(daily_rollup) > 1 else 0.0
 total_volume = float(selected_rows.volume_ton.sum())
-main_market = chosen_market or "서울가락"
+main_market = chosen_market or ("서울가락" if "서울가락" in comparison_markets else comparison_markets[0])
 main_market_name = MARKET_LABEL[main_market]
 overview_market_name = main_market_name if chosen_market else "주요 5개 시장"
 latest_sub = available.copy()
@@ -719,7 +781,7 @@ st.caption(f"최근 실거래 기준일: {latest_label}")
 
 main_sub = forecast[forecast.market == main_market].sort_values("date")
 if main_sub.empty:
-    main_sub = forecast.sort_values("date")
+    main_sub = forecast[forecast.market.isin(comparison_markets)].sort_values("date")
     main_market_name = MARKET_LABEL[main_sub.market.iloc[0]]
 st.subheader(f"7일 가격·거래량 {value_label}")
 st.caption("가격과 거래량은 단위가 달라 각각 나눠 표시합니다.")
@@ -763,54 +825,59 @@ with volume_col:
 market_colors = {}
 if chosen_market is None:
     st.subheader("주요 5개 시장 비교")
-    st.caption("전체 시장 집계는 제외하고, 주요 5개 시장을 각각 표시합니다.")
-    comparison = forecast[forecast.market.isin(MARKETS)].copy()
+    st.caption("주요 5개 시장 모두에 데이터가 있는 거래일만 비교합니다.")
+    comparison = forecast[forecast.market.isin(comparison_markets)].copy()
+    comparison = only_common_market_dates(comparison, len(comparison_markets))
     market_palette = ["#267451", "#e28a3b", "#4e79a7", "#9b6c9e", "#c74f53"]
-    market_colors = {MARKET_LABEL[m]: color for m, color in zip(MARKETS, market_palette)}
+    market_colors = {MARKET_LABEL[m]: color for m, color in zip(comparison_markets, market_palette)}
 else:
     st.subheader("선택 시장과 전체 시장 비교")
-    st.caption(f"{MARKET_LABEL[chosen_market]}와 데이터에 있는 전체 {len(ALL_MARKETS)}개 시장 평균을 비교합니다.")
+    st.caption(f"{MARKET_LABEL[chosen_market]}와 전체 시장에 모두 데이터가 있는 거래일만 비교합니다.")
     selected_label = MARKET_LABEL[chosen_market]
     market_colors = {selected_label: "#267451", "전체 시장": "#929a95"}
-compare_mode = st.radio("비교 그래프", ["가격 추이", "거래량 비교"], horizontal=True, label_visibility="collapsed", key="compare_mode")
-if chosen_market is not None:
     selected_comparison = forecast[forecast.market == chosen_market].copy()
     selected_comparison["market"] = selected_label
     overall_comparison = aggregate_market_frame(forecast, ALL_MARKETS, "전체 시장")
     comparison = pd.concat([selected_comparison, overall_comparison], ignore_index=True)
-comparison["시장"] = comparison.market.map(lambda market: MARKET_LABEL.get(market, market))
-if compare_mode == "가격 추이":
-    compare_fig = px.line(comparison, x="date", y="price_kg", color="시장", markers=True,
-    labels={"date":f"{value_label}일", "price_kg":f"{value_label} 단가 (원/kg)", "시장":"도매시장"}, color_discrete_map=market_colors)
-    compare_fig.update_traces(line=dict(width=2.7), marker=dict(size=7))
-    compare_low, compare_high = float(comparison.price_kg.min()), float(comparison.price_kg.max())
-    compare_pad = max((compare_high - compare_low) * .15, compare_high * .02, 20.0)
-    compare_fig.update_yaxes(title=f"{value_label} 단가 (원/kg)", range=[max(0, compare_low - compare_pad), compare_high + compare_pad], gridcolor="#edf1ed")
-else:
-    compare_fig = px.bar(comparison, x="date", y="volume_ton", color="시장", barmode="group",
-        labels={"date":f"{value_label}일", "volume_ton":f"{value_label} 거래량 (톤)", "시장":"도매시장"}, color_discrete_map=market_colors)
-    compare_fig.update_yaxes(title=f"{value_label} 거래량 (톤)", rangemode="tozero", gridcolor="#edf1ed")
-compare_fig.update_layout(
-    height=350, margin=dict(l=12,r=14,t=28,b=18), plot_bgcolor="#ffffff", paper_bgcolor="rgba(255,255,255,0)",
-    font=dict(family="Arial, sans-serif", color="#52665b"), legend=dict(orientation="h", y=1.12, x=.02),
-)
-compare_fig.update_xaxes(title=None, tickformat="%m/%d", showgrid=False, linecolor="#dfe8e1")
-st.plotly_chart(compare_fig, use_container_width=True, config={"displayModeBar": False})
+    comparison = only_common_market_dates(comparison, 2)
 
-summary = market_summary(comparison, target_date, float(box_kg), value_label)
-st.subheader(f"주요 5개 시장 {value_label} 요약" if chosen_market is None else
-             f"선택 시장·전체 시장 {value_label} 요약")
-st.caption("선택일 가격과 7일 누적 거래량을 비교합니다.")
-st.dataframe(summary, width="stretch", hide_index=True, column_config={
-    f"선택일 {value_label} 가격 (원/kg)": st.column_config.NumberColumn(format="%d원/kg"),
-    "선택일 상자 가격 (원)": st.column_config.NumberColumn(format="%d원"),
-    f"7일 평균 {value_label} 가격 (원/kg)": st.column_config.NumberColumn(format="%d원/kg"),
-    "7일 가격 변동 (%)": st.column_config.NumberColumn(format="%.1f%%"),
-    f"7일 총 {value_label} 거래량 (톤)": st.column_config.NumberColumn(format="%.2f톤"),
-    "일평균 거래량 (톤)": st.column_config.NumberColumn(format="%.2f톤"),
-})
-st.download_button(f"{value_label} 요약 CSV 저장", summary.to_csv(index=False).encode("utf-8-sig"),
-    file_name=f"citrus_market_{'actuals' if is_historical_selection else 'forecast'}_summary.csv", mime="text/csv")
+if comparison.empty:
+    st.info("현재 선택한 조건에는 공통으로 비교할 수 있는 거래일 데이터가 없습니다.")
+else:
+    comparison["시장"] = comparison.market.map(lambda market: MARKET_LABEL.get(market, market))
+    compare_mode = st.radio("비교 그래프", ["가격 추이", "거래량 비교"], horizontal=True, label_visibility="collapsed", key="compare_mode")
+    if compare_mode == "가격 추이":
+        compare_fig = px.line(comparison, x="date", y="price_kg", color="시장", markers=True,
+        labels={"date":f"{value_label}일", "price_kg":f"{value_label} 단가 (원/kg)", "시장":"도매시장"}, color_discrete_map=market_colors)
+        compare_fig.update_traces(line=dict(width=2.7), marker=dict(size=7))
+        compare_low, compare_high = float(comparison.price_kg.min()), float(comparison.price_kg.max())
+        compare_pad = max((compare_high - compare_low) * .15, compare_high * .02, 20.0)
+        compare_fig.update_yaxes(title=f"{value_label} 단가 (원/kg)", range=[max(0, compare_low - compare_pad), compare_high + compare_pad], gridcolor="#edf1ed")
+    else:
+        compare_fig = px.bar(comparison, x="date", y="volume_ton", color="시장", barmode="group",
+            labels={"date":f"{value_label}일", "volume_ton":f"{value_label} 거래량 (톤)", "시장":"도매시장"}, color_discrete_map=market_colors)
+        compare_fig.update_yaxes(title=f"{value_label} 거래량 (톤)", rangemode="tozero", gridcolor="#edf1ed")
+    compare_fig.update_layout(
+        height=350, margin=dict(l=12,r=14,t=28,b=18), plot_bgcolor="#ffffff", paper_bgcolor="rgba(255,255,255,0)",
+        font=dict(family="Arial, sans-serif", color="#52665b"), legend=dict(orientation="h", y=1.12, x=.02),
+    )
+    compare_fig.update_xaxes(title=None, tickformat="%m/%d", showgrid=False, linecolor="#dfe8e1")
+    st.plotly_chart(compare_fig, use_container_width=True, config={"displayModeBar": False})
+
+    summary = market_summary(comparison, target_date, float(box_kg), value_label)
+    st.subheader(f"주요 5개 시장 {value_label} 요약" if chosen_market is None else
+                 f"선택 시장·전체 시장 {value_label} 요약")
+    st.caption("모든 비교 대상에 데이터가 있는 거래일만 요약합니다.")
+    st.dataframe(summary, width="stretch", hide_index=True, column_config={
+        f"선택일 {value_label} 가격 (원/kg)": st.column_config.NumberColumn(format="%d원/kg"),
+        "선택일 상자 가격 (원)": st.column_config.NumberColumn(format="%d원"),
+        f"7일 평균 {value_label} 가격 (원/kg)": st.column_config.NumberColumn(format="%d원/kg"),
+        "7일 가격 변동 (%)": st.column_config.NumberColumn(format="%.1f%%"),
+        f"7일 총 {value_label} 거래량 (톤)": st.column_config.NumberColumn(format="%.2f톤"),
+        "일평균 거래량 (톤)": st.column_config.NumberColumn(format="%.2f톤"),
+    })
+    st.download_button(f"{value_label} 요약 CSV 저장", summary.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"citrus_market_{'actuals' if is_historical_selection else 'forecast'}_summary.csv", mime="text/csv")
 
 st.subheader(f"{main_market_name} 일별 {value_label}")
 st.caption(f"{variety} · {box_kg:g}kg · 전체 등급·크기 기준")
@@ -842,7 +909,7 @@ actuals_start = actuals_end - timedelta(days=6)
 actuals = actuals_for(history, ALL_MARKETS, variety, float(box_kg), grade, size, actuals_start, actuals_end)
 if not actuals.empty:
     if chosen_market is None:
-        actuals = actuals[actuals.market.isin(MARKETS)].copy()
+        actuals = actuals[actuals.market.isin(comparison_markets)].copy()
         actuals["시장"] = actuals.market.map(MARKET_LABEL)
     else:
         actuals_selected = actuals[actuals.market == chosen_market].copy()

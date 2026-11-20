@@ -1,30 +1,31 @@
 {
-  "generated_on": "2026-11-19",
+  "generated_on": "2026-11-20",
   "history_last_date": "2026-11-11",
   "market_count": 32,
-  "forecast_start_min": "2026-11-16",
-  "forecast_start_max": "2026-11-26",
-  "forecast_rows": 10696,
+  "forecast_start_min": "2026-11-17",
+  "forecast_start_max": "2026-11-27",
+  "forecast_rows": 20888,
   "validation_start": "2026-09-27",
   "validation_end": "2026-11-11",
-  "volume_train_rows": 380568,
-  "price_train_rows": 269840,
+  "volume_train_rows": 120000,
+  "price_train_rows": 120000,
+  "training_sample_limit_per_target": 120000,
   "scores": {
     "price": {
-      "MAE": 789.5877257526425,
-      "RMSE": 1201.9597632548166,
-      "MAPE": 37.09929794751232,
-      "R2": 0.49449218197110556,
-      "n": 7225,
-      "n_positive": 7223
+      "MAE": 793.6783589077836,
+      "RMSE": 1204.297809590387,
+      "MAPE": 37.78552776250771,
+      "R2": 0.4922205023467745,
+      "n": 7239,
+      "n_positive": 7237
     },
     "volume": {
-      "MAE": 0.6599169811540082,
-      "RMSE": 3.8296335403491564,
-      "MAPE": 85.89880841627433,
-      "R2": 0.7743521671260924,
-      "n": 8786,
-      "n_positive": 2094
+      "MAE": 0.41190609797799965,
+      "RMSE": 3.83519344365408,
+      "MAPE": 89.25060824997836,
+      "R2": 0.5638565664879936,
+      "n": 17158,
+      "n_positive": 2104
     }
   }
 }
