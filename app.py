@@ -256,6 +256,12 @@ def load_precomputed_forecasts():
     return frame
 
 
+def load_forecast_coverage() -> pd.DataFrame:
+    if not FORECASTS_PATH.exists():
+        return pd.DataFrame(columns=["market", "variety", "box_kg"])
+    return pd.read_csv(FORECASTS_PATH, usecols=["market", "variety", "box_kg"])
+
+
 @st.cache_data(show_spinner=False)
 def load_precomputed_model_info():
     if not MODEL_INFO_PATH.exists():
@@ -609,7 +615,11 @@ except Exception as exc:
     st.error(f"데이터를 불러오지 못했습니다: {exc}")
     st.stop()
 
-PRODUCTS_WITH_DATA = products_with_source_data(history)
+forecast_coverage = load_forecast_coverage()
+PRODUCTS_WITH_DATA = sorted(
+    set(products_with_source_data(history))
+    | set(forecast_coverage["variety"].dropna().astype(str))
+)
 PRODUCTS_WITHOUT_DATA = [product for product in PRODUCTS if product not in PRODUCTS_WITH_DATA]
 
 MARKETS = manifest["top5_markets"]
@@ -652,7 +662,12 @@ with st.sidebar:
     together_option = "주요 5개 시장 함께 보기"
     available_market_ids = [
         market for market in MARKETS
-        if ((history.market == market) & (history.variety == variety) & (history.box_kg == float(box_kg))).any()
+        if (
+            ((history.market == market) & (history.variety == variety) & (history.box_kg == float(box_kg))).any()
+            or ((forecast_coverage.market == market)
+                & (forecast_coverage.variety == variety)
+                & (forecast_coverage.box_kg == float(box_kg))).any()
+        )
     ]
     market_options = [together_option] + [MARKET_LABEL[m] for m in MARKETS]
     if st.session_state.get("market_choice") not in market_options:
@@ -729,12 +744,18 @@ if is_historical_selection:
     forecast["grade_share"] = 1.0
     value_label = "실거래"
 else:
-    forecast = precomputed_forecasts[
-        (precomputed_forecasts.forecast_start.dt.date == target_date)
-        & (precomputed_forecasts.market.isin(ALL_MARKETS))
+    stored_for_selection = precomputed_forecasts[
+        (precomputed_forecasts.market.isin(ALL_MARKETS))
         & (precomputed_forecasts.variety == variety)
         & (precomputed_forecasts.box_kg == float(box_kg))
     ].copy()
+    exact_start = stored_for_selection.forecast_start.dt.date == target_date
+    forecast = stored_for_selection[exact_start].copy()
+    if forecast.empty and not stored_for_selection.empty:
+        starts = sorted(stored_for_selection.forecast_start.dt.date.dropna().unique())
+        nearest_start = min(starts, key=lambda day: abs((day - target_date).days))
+        forecast = stored_for_selection[stored_for_selection.forecast_start.dt.date == nearest_start].copy()
+        st.info(f"{target_date:%Y-%m-%d} 저장 예측이 없어 {nearest_start:%Y-%m-%d} 기준 저장 예측을 표시합니다.")
     if forecast.empty:
         st.warning(
             f"{target_date:%Y-%m-%d} 예측 데이터가 저장 파일에 없습니다. "
