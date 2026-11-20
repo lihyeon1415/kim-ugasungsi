@@ -698,7 +698,7 @@ with st.sidebar:
         st.rerun()
 
 st.title("🍊 감귤 도매시장 7일 예측")
-st.caption(f"RandomForest · 제공된 병합 CSV 한 파일 · 자료 기간 {history.date.min():%Y-%m-%d} ~ {last_actual_date:%Y-%m-%d}")
+st.caption(f"RandomForest · 네 품목 저장 예측 · 자료 기간 {history.date.min():%Y-%m-%d} ~ {last_actual_date:%Y-%m-%d}")
 st.divider()
 
 with st.spinner("미리 계산해 저장한 예측 데이터를 불러오는 중입니다."):
@@ -961,6 +961,13 @@ with st.expander("주차 진행 내용 및 입력되지 않은 항목"):
 
 with st.expander("원본 파일 조사 내역"):
     st.write(f"사용 원본: {manifest['source_archive']} 안의 {manifest['source_member_used']} 한 파일.")
+    supplement_info = manifest.get("supplement_source")
+    if supplement_info:
+        st.write(
+            f"추가 품목 자료: {supplement_info['file']} · "
+            f"한라봉·천혜향 {supplement_info['aggregated_rows']:,}행 · "
+            f"{supplement_info['markets']}개 시장."
+        )
     st.write(f"원본 {manifest['source_rows']:,}행, {manifest['source_market_count']}개 시장, {manifest['source_date_min']}~{manifest['source_date_max']}.")
     st.write(f"지정 품목·상자 중량 {manifest['selected_raw_rows']:,}행; 정확 중복 {manifest['selected_exact_duplicate_rows']:,}행.")
     valid_unique_rows = manifest.get("valid_unique_rows")
