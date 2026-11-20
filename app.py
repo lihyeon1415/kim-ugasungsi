@@ -19,7 +19,6 @@ from sklearn.preprocessing import OneHotEncoder
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "rf_dashboard_history.csv"
-SUPPLEMENT_PATH = BASE_DIR / "rf_dashboard_supplement.csv"
 MANIFEST_PATH = BASE_DIR / "data_manifest.json"
 MODEL_PATH = BASE_DIR / "rf_model_bundle.pkl"
 FORECASTS_PATH = BASE_DIR / "rf_precomputed_forecasts.csv"
