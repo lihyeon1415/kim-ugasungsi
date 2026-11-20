@@ -696,7 +696,11 @@ with st.sidebar:
     quick_buttons = [(b1, f"오늘 ({today:%m/%d})", today), (b2, "+7일", quick_week_date)]
     for i, (col, label, chosen) in enumerate(quick_buttons):
         if col.button(label, key=f"quick_{i}", width="stretch"):
-            st.session_state["quick_target_date"] = chosen
+            if chosen <= picker_max:
+                st.session_state["forecast_date"] = chosen
+                st.session_state.pop("quick_target_date", None)
+            else:
+                st.session_state["quick_target_date"] = chosen
     picker_date = st.date_input(
         "날짜 선택 (오늘 기준 3일 전~3일 후)", min_value=picker_min, max_value=picker_max,
         key="forecast_date", on_change=clear_quick_date_override,
